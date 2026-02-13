@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS/Editor
+.vscode/
+.claude/
+.gradio/
+.DS_Store
+Thumbs.db
+
+# Runtime/temp
+temp/uploads/
+*.log
+
+# Local env
+.env
+.env.*
