@@ -1,0 +1,18 @@
+{
+  "model_type": "ensemble",
+  "train_accuracy": 1.0,
+  "test_accuracy": 1.0,
+  "cv_accuracy_mean": 1.0,
+  "cv_accuracy_std": 0.0,
+  "classes": [
+    "als",
+    "alzheimers",
+    "healthy",
+    "multiple_sclerosis",
+    "parkinsons",
+    "stroke"
+  ],
+  "n_features": 85,
+  "n_samples": 1200,
+  "trained_at": "2026-02-14T02:02:37.214950"
+}

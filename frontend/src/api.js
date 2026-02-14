@@ -6,6 +6,7 @@ const API_BASE_URL = `${API_ROOT_URL}/api`;
 // Create axios instance with default config
 const api = axios.create({
   baseURL: API_BASE_URL,
+  timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -57,6 +58,16 @@ export const analysisAPI = {
       },
     });
   },
+  analyzeAudioMultiDisease: (audioFile, testType = 'sustained_vowel') => {
+    const formData = new FormData();
+    formData.append('audio', audioFile);
+    formData.append('test_type', testType);
+    return api.post('/analyze/multi-disease', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
 };
 
 // Dashboard APIs
@@ -70,6 +81,25 @@ export const profileAPI = {
   getProfile: () => api.get('/profile'),
   addEmergencyContact: (contact) => api.post('/profile/emergency', contact),
   getEmergencyContacts: () => api.get('/profile/emergency'),
+};
+
+// Booking APIs
+export const bookingAPI = {
+  getDoctors: (city, specialization) => {
+    const params = new URLSearchParams();
+    if (city) params.append('city', city);
+    if (specialization) params.append('specialization', specialization);
+    return api.get(`/doctors?${params.toString()}`);
+  },
+  getDoctorById: (doctorId) => api.get(`/doctors/${doctorId}`),
+  bookAppointment: (appointmentData) => api.post('/appointments', appointmentData),
+  getAppointments: (status) => {
+    const params = status ? `?status=${status}` : '';
+    return api.get(`/appointments${params}`);
+  },
+  updateAppointment: (appointmentId, data) => api.patch(`/appointments/${appointmentId}`, data),
+  addReview: (doctorId, reviewData) => api.post(`/doctors/${doctorId}/reviews`, reviewData),
+  getReviews: (doctorId) => api.get(`/doctors/${doctorId}/reviews`),
 };
 
 // Helper function to get image URLs

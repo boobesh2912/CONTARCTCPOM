@@ -12,6 +12,7 @@ import Dashboard from './components/Dashboard';
 import TestPage from './components/TestPage';
 import Learning from './components/Learning';
 import Profile from './components/Profile';
+import Bookings from './components/Bookings';
 import { authAPI } from './api';
 
 function App() {
@@ -133,6 +134,16 @@ function App() {
           element={
             isAuthenticated ? (
               <Learning user={user} onLogout={handleLogout} />
+            ) : (
+              <Navigate to="/login" replace />
+            )
+          }
+        />
+        <Route
+          path="/bookings"
+          element={
+            isAuthenticated ? (
+              <Bookings user={user} onLogout={handleLogout} />
             ) : (
               <Navigate to="/login" replace />
             )

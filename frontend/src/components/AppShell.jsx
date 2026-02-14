@@ -5,6 +5,7 @@ import { Menu, X, ShieldCheck, LogOut } from 'lucide-react';
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Overview' },
   { to: '/test', label: 'Voice Test' },
+  { to: '/bookings', label: 'Consultations' },
   { to: '/learning', label: 'Learning' },
   { to: '/profile', label: 'Account' },
 ];

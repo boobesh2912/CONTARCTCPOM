@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, Mic, Square, UploadCloud } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2, Mic, Square, UploadCloud, Calendar } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import AppShell from './AppShell';
 import { analysisAPI, getImageUrl } from '../api';
 
@@ -60,12 +61,14 @@ async function convertBlobToWav(blob) {
 }
 
 const TestPage = ({ user, onLogout }) => {
+  const navigate = useNavigate();
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [audioFile, setAudioFile] = useState(null);
+  const [testType, setTestType] = useState('sustained_vowel');
 
   const timerRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -91,8 +94,14 @@ const TestPage = ({ user, onLogout }) => {
     setError('');
 
     try {
-      const response = await analysisAPI.analyzeAudio(input);
-      setResult(response.data);
+      const response = await analysisAPI.analyzeAudioMultiDisease(input, testType);
+      const data = response.data;
+      const normalized = {
+        ...data,
+        risk_score: data.overall_risk_score ?? data.risk_score ?? 0,
+        confidence: (data.primary_diagnosis?.probability ?? 0) / 100,
+      };
+      setResult(normalized);
     } catch (err) {
       setError(err.response?.data?.error || 'Analysis failed. Please try again.');
     } finally {
@@ -174,6 +183,10 @@ const TestPage = ({ user, onLogout }) => {
   };
 
   const tone = result ? riskTone(result.risk_score) : null;
+  const features = result?.features || result?.key_features || {};
+  const visualizations = result?.visualizations || {};
+  const recommendations = Array.isArray(result?.recommendations) ? result.recommendations : [];
+  const allDiseases = Array.isArray(result?.all_diseases) ? result.all_diseases : [];
 
   return (
     <AppShell
@@ -193,34 +206,79 @@ const TestPage = ({ user, onLogout }) => {
           <section className={`${panelClass} text-center`}>
             <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${tone.bg} ${tone.text}`}>{tone.badge}</span>
             <h2 className="mt-3 font-display text-3xl font-bold text-[var(--ink-900)]">Risk Score: {result.risk_score}%</h2>
-            <p className="mt-1 text-sm text-[var(--ink-700)]">Confidence: {Math.round(result.confidence * 100)}%</p>
+            <p className="mt-1 text-sm text-[var(--ink-700)]">
+              Primary Detection: <strong>{result.primary_diagnosis?.disease_name || result.prediction || 'N/A'}</strong>{' '}
+              ({Math.round((result.primary_diagnosis?.probability ?? result.confidence * 100) || 0)}%)
+            </p>
             <div className="mx-auto mt-4 h-2 max-w-xl rounded-full bg-[var(--bg-2)]">
-              <div className="h-2 rounded-full bg-[var(--ink-900)]" style={{ width: `${Math.round(result.confidence * 100)}%` }} />
+              <div className="h-2 rounded-full bg-[var(--ink-900)]" style={{ width: `${result.risk_score}%` }} />
             </div>
           </section>
 
+          {allDiseases.length > 0 && (
+            <section className={panelClass}>
+              <h3 className="mb-4 font-display text-lg font-bold text-[var(--ink-900)]">Disease Probability Breakdown</h3>
+              <div className="space-y-3">
+                {allDiseases.map((disease) => (
+                  <div key={disease.disease} className="rounded-xl border border-[var(--line)] bg-white p-3">
+                    <div className="mb-2 flex items-center justify-between text-sm">
+                      <span className="font-semibold text-[var(--ink-900)]">{disease.disease_name}</span>
+                      <span className="font-semibold text-[var(--ink-700)]">{Number(disease.probability || 0).toFixed(1)}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-[var(--bg-2)]">
+                      <div className="h-2 rounded-full bg-[var(--brand-700)]" style={{ width: `${Math.min(100, Number(disease.probability || 0))}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           <section className="grid gap-4 md:grid-cols-4">
-            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">Jitter</p><p className="font-display text-2xl font-bold">{result.features.jitter_relative.toFixed(4)}</p></div>
-            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">Shimmer</p><p className="font-display text-2xl font-bold">{result.features.shimmer_relative.toFixed(4)}</p></div>
-            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">HNR (dB)</p><p className="font-display text-2xl font-bold">{result.features.hnr.toFixed(2)}</p></div>
-            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">F0 Mean (Hz)</p><p className="font-display text-2xl font-bold">{result.features.f0_mean.toFixed(1)}</p></div>
+            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">Jitter</p><p className="font-display text-2xl font-bold">{Number(features.jitter_relative || 0).toFixed(4)}</p></div>
+            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">Shimmer</p><p className="font-display text-2xl font-bold">{Number(features.shimmer_relative || 0).toFixed(4)}</p></div>
+            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">HNR (dB)</p><p className="font-display text-2xl font-bold">{Number(features.hnr || 0).toFixed(2)}</p></div>
+            <div className={panelClass}><p className="text-xs text-[var(--ink-600)]">F0 Mean (Hz)</p><p className="font-display text-2xl font-bold">{Number(features.f0_mean || 0).toFixed(1)}</p></div>
           </section>
 
           <section className="grid gap-4 md:grid-cols-2">
             <article className={panelClass}>
               <h3 className="mb-3 font-display text-lg font-bold">Waveform</h3>
-              <img src={getImageUrl(result.visualizations.waveform_url)} alt="Waveform" className="w-full rounded-xl border border-[var(--line)]" />
+              <img src={getImageUrl(visualizations.waveform_url)} alt="Waveform" className="w-full rounded-xl border border-[var(--line)]" />
             </article>
             <article className={panelClass}>
               <h3 className="mb-3 font-display text-lg font-bold">Spectrogram</h3>
-              <img src={getImageUrl(result.visualizations.spectrogram_url)} alt="Spectrogram" className="w-full rounded-xl border border-[var(--line)]" />
+              <img src={getImageUrl(visualizations.spectrogram_url)} alt="Spectrogram" className="w-full rounded-xl border border-[var(--line)]" />
             </article>
           </section>
+
+          {result.risk_score >= 70 && (
+            <section className="rounded-2xl border-2 border-rose-200 bg-gradient-to-r from-rose-50 to-orange-50 p-6 shadow-soft">
+              <div className="flex items-start gap-4">
+                <div className="rounded-full bg-rose-100 p-3">
+                  <AlertCircle className="h-6 w-6 text-rose-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-display text-xl font-bold text-rose-900">Immediate Consultation Recommended</h3>
+                  <p className="mt-2 text-sm text-rose-800">
+                    Your risk score of <strong>{result.risk_score}%</strong> suggests you should consult with a neurologist specialized in movement disorders as soon as possible. Early detection and intervention can significantly improve outcomes.
+                  </p>
+                  <button
+                    onClick={() => navigate('/bookings')}
+                    className="mt-4 inline-flex items-center gap-2 rounded-full bg-rose-600 px-6 py-3 font-semibold text-white shadow-md hover:bg-rose-700"
+                  >
+                    <Calendar className="h-5 w-5" />
+                    Book Consultation Now
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
 
           <section className={panelClass}>
             <h3 className="mb-3 font-display text-lg font-bold text-[var(--ink-900)]">Recommendations</h3>
             <ul className="space-y-2">
-              {result.recommendations.map((rec, idx) => (
+              {recommendations.map((rec, idx) => (
                 <li key={idx} className="flex items-start gap-2 text-sm text-[var(--ink-800)]">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 text-[var(--brand-700)]" />
                   <span>{rec}</span>
@@ -230,6 +288,11 @@ const TestPage = ({ user, onLogout }) => {
             <div className="mt-4 flex flex-col gap-3 sm:flex-row">
               <button onClick={resetTest} className="rounded-full border border-[var(--line)] bg-white px-5 py-2 text-sm font-semibold">Run New Test</button>
               <button onClick={() => (window.location.href = '/dashboard')} className="rounded-full bg-[var(--ink-900)] px-5 py-2 text-sm font-semibold text-white">Back to Overview</button>
+              {result.risk_score >= 50 && (
+                <button onClick={() => navigate('/bookings')} className="rounded-full bg-[var(--brand-700)] px-5 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-800)]">
+                  Find a Doctor
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -240,6 +303,17 @@ const TestPage = ({ user, onLogout }) => {
               <div>
                 <h2 className="font-display text-2xl font-bold text-[var(--ink-900)]">Record Live Sample</h2>
                 <p className="mt-2 text-sm text-[var(--ink-700)]">Speak naturally for up to 30 seconds in a quiet room.</p>
+                <div className="mt-4">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-600)]">Test Type</label>
+                  <select
+                    value={testType}
+                    onChange={(e) => setTestType(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm text-[var(--ink-800)]"
+                  >
+                    <option value="sustained_vowel">Sustained Vowel (Recommended)</option>
+                    <option value="vowel_sequence">Vowel Sequence (a-e-i-o-u)</option>
+                  </select>
+                </div>
                 <div className="mt-6 flex items-center gap-4">
                   <div className={`flex h-24 w-24 items-center justify-center rounded-full ${isRecording ? 'bg-rose-100' : 'bg-[var(--brand-100)]'}`}>
                     <Mic className={`h-10 w-10 ${isRecording ? 'recording-pulse text-rose-600' : 'text-[var(--brand-700)]'}`} />

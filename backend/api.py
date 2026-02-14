@@ -5,13 +5,22 @@ Wraps existing backend functions from app.py, db_utils.py, auth_routes.py
 import os
 import sys
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from typing import Any, Dict, List, Optional
 
 from flask import Flask, request, jsonify, send_from_directory, session
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import jwt
+import joblib
+import numpy as np
+import pandas as pd
+import librosa
+from librosa import display as librosa_display
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # Add parent directory to path to import existing modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,16 +30,30 @@ TEMP_DIR = os.path.join(PROJECT_ROOT, 'temp')
 UPLOAD_DIR = os.path.join(TEMP_DIR, 'uploads')
 
 # Import existing backend functions
-from app import predict_parkinsons, analyze_audio_file
 from db_utils import (
     initialize_database,
+    get_db_connection,
     authenticate_user,
     register_user,
     add_emergency_contact,
     get_user_emergency_contacts,
     save_test_result,
-    get_user_test_history as get_user_tests
+    get_user_test_history as get_user_tests,
+    # Doctor booking system functions
+    add_doctor,
+    get_all_doctors,
+    get_doctor_by_id,
+    add_doctor_availability,
+    get_doctor_availability,
+    create_appointment,
+    get_user_appointments,
+    get_doctor_appointments,
+    update_appointment_status,
+    add_doctor_review,
+    get_doctor_reviews
 )
+from multi_disease_detector import analyze_multi_disease, get_recording_instructions
+from utils.advanced_features import extract_advanced_features
 
 # Flask app configuration
 app = Flask(__name__)
@@ -57,15 +80,119 @@ initialize_database()
 JWT_SECRET = app.config['SECRET_KEY']
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_HOURS = 24
+PARKINSON_MODEL: Optional[Any] = None
+PARKINSON_FEATURE_NAMES: List[str] = []
+READINESS_TABLES = ['users', 'test_results', 'doctors', 'doctor_availability', 'appointments', 'doctor_reviews']
 
 
-def allowed_file(filename):
+def initialize_model_cache() -> None:
+    """Load reusable model assets once at process startup."""
+    global PARKINSON_MODEL, PARKINSON_FEATURE_NAMES
+
+    model_path = os.path.join(MODELS_DIR, 'parkinson_model.pkl')
+    feature_names_path = os.path.join(MODELS_DIR, 'feature_names.txt')
+
+    if os.path.exists(model_path):
+        PARKINSON_MODEL = joblib.load(model_path)
+        print(f"Loaded Parkinson model from {model_path}")
+    else:
+        print(f"Warning: model file not found at {model_path}")
+
+    if os.path.exists(feature_names_path):
+        with open(feature_names_path, 'r') as f:
+            PARKINSON_FEATURE_NAMES = f.read().splitlines()
+        print(f"Loaded {len(PARKINSON_FEATURE_NAMES)} feature names from {feature_names_path}")
+    else:
+        PARKINSON_FEATURE_NAMES = []
+        print(f"Warning: feature names file not found at {feature_names_path}")
+
+
+if os.environ.get('MEDIGUARDIAN_EAGER_MODEL_LOAD', '0') == '1':
+    initialize_model_cache()
+
+
+def collect_readiness() -> Dict[str, Any]:
+    """Collect runtime readiness diagnostics for production monitoring."""
+    readiness: Dict[str, Any] = {
+        'checked_at': datetime.now(timezone.utc).isoformat(),
+        'model_cache': {
+            'parkinson_model_loaded': PARKINSON_MODEL is not None,
+            'feature_name_count': len(PARKINSON_FEATURE_NAMES),
+        },
+        'database': {
+            'connected': False,
+            'missing_tables': [],
+            'doctor_count': 0,
+        },
+    }
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        readiness['database']['connected'] = True
+
+        missing_tables: List[str] = []
+        for table in READINESS_TABLES:
+            cursor.execute(
+                "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)
+            )
+            if cursor.fetchone()['c'] == 0:
+                missing_tables.append(table)
+
+        readiness['database']['missing_tables'] = missing_tables
+
+        if 'doctors' not in missing_tables:
+            cursor.execute("SELECT COUNT(*) as c FROM doctors")
+            readiness['database']['doctor_count'] = int(cursor.fetchone()['c'])
+
+        conn.close()
+    except Exception as exc:
+        readiness['database']['error'] = str(exc)
+
+    model_ready = readiness['model_cache']['parkinson_model_loaded']
+    db_ready = readiness['database']['connected'] and len(readiness['database']['missing_tables']) == 0
+    seeded = readiness['database']['doctor_count'] > 0
+    readiness['status'] = 'ready' if (model_ready and db_ready and seeded) else 'degraded'
+
+    return readiness
+
+
+def allowed_file(filename: str) -> bool:
     """Check if file extension is allowed"""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 
-def create_token(user_data):
+def analyze_audio_file(audio_file: str):
+    """Process audio and generate feature set + temporary visualizations."""
+    y, sr = librosa.load(audio_file)
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(np.linspace(0, len(y) / sr, len(y)), y)
+    plt.title('Audio Waveform')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.tight_layout()
+    plt.savefig(os.path.join(TEMP_DIR, 'waveform.png'))
+    plt.close()
+
+    plt.figure(figsize=(12, 6))
+    D = librosa.amplitude_to_db(np.abs(librosa.stft(y)), ref=np.max)
+    librosa_display.specshow(D, sr=sr, x_axis='time', y_axis='log')
+    plt.colorbar(format='%+2.0f dB')
+    plt.title('Spectrogram')
+    plt.tight_layout()
+    plt.savefig(os.path.join(TEMP_DIR, 'spectrogram.png'))
+    plt.close()
+
+    features = extract_advanced_features(y, sr)
+    return y, sr, features
+
+
+def create_token(user_data: Dict[str, Any]) -> str:
     """Create JWT token for authenticated user"""
     payload = {
         'user_id': user_data['id'],
@@ -73,13 +200,13 @@ def create_token(user_data):
         'email': user_data['email'],
         'first_name': user_data['first_name'],
         'last_name': user_data['last_name'],
-        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
-        'iat': datetime.utcnow()
+        'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS),
+        'iat': datetime.now(timezone.utc)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def decode_token(token):
+def decode_token(token: str) -> Optional[Dict[str, Any]]:
     """Decode and validate JWT token"""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -238,29 +365,18 @@ def analyze_audio():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
-        # Call existing predict_parkinsons function
-        result_html = predict_parkinsons(filepath)
-
         # Extract data for JSON response
         # Parse features from analyze_audio_file
         y, sr, features = analyze_audio_file(filepath)
 
-        # Determine prediction from features
-        import joblib
-        import numpy as np
-        import pandas as pd
-
-        model = joblib.load(os.path.join(MODELS_DIR, 'parkinson_model.pkl'))
+        if PARKINSON_MODEL is None:
+            initialize_model_cache()
+        if PARKINSON_MODEL is None:
+            return jsonify({'error': 'Prediction model is not available on server'}), 503
 
         # Load feature names if available
-        feature_names = []
-        feature_names_path = os.path.join(MODELS_DIR, 'feature_names.txt')
-        if os.path.exists(feature_names_path):
-            with open(feature_names_path, 'r') as f:
-                feature_names = f.read().splitlines()
-
-        if feature_names:
-            feature_values = [features.get(name, 0) for name in feature_names]
+        if PARKINSON_FEATURE_NAMES:
+            feature_values = [features.get(name, 0) for name in PARKINSON_FEATURE_NAMES]
             feature_array = np.array([feature_values])
         else:
             features_df = pd.DataFrame([features])
@@ -274,14 +390,14 @@ def analyze_audio():
         confidence = 0.5
         risk_score = 15  # Default low risk
 
-        if hasattr(model, 'predict_proba'):
-            probability = model.predict_proba(feature_array)[0]
+        if hasattr(PARKINSON_MODEL, 'predict_proba'):
+            probability = PARKINSON_MODEL.predict_proba(feature_array)[0]
             parkinsons_prob = probability[1] if len(probability) > 1 else 0.5
             prediction = 'parkinsons' if parkinsons_prob > 0.7 else 'healthy'
             confidence = parkinsons_prob if prediction == 'parkinsons' else (1 - parkinsons_prob)
             risk_score = int(parkinsons_prob * 100)
         else:
-            prediction = model.predict(feature_array)[0]
+            prediction = PARKINSON_MODEL.predict(feature_array)[0]
             confidence = 0.8
 
         # Generate recommendations
@@ -341,6 +457,89 @@ def analyze_audio():
 
     except Exception as e:
         return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+
+
+@app.route('/api/analyze/multi-disease', methods=['POST'])
+def analyze_audio_multi_disease():
+    """Analyze uploaded audio file for multiple neurological disorders"""
+    try:
+        # Check if file is present
+        if 'audio' not in request.files:
+            return jsonify({'error': 'No audio file provided'}), 400
+
+        file = request.files['audio']
+
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'Invalid file type. Allowed: WAV, MP3, OGG, FLAC, M4A'}), 400
+
+        # Get test type from form data
+        test_type = request.form.get('test_type', 'sustained_vowel')
+
+        # Save uploaded file
+        filename = secure_filename(file.filename)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{timestamp}_{filename}"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        # Perform multi-disease analysis
+        results = analyze_multi_disease(filepath, test_type=test_type)
+
+        # Save test result if user is authenticated
+        user_id = None
+        token = request.headers.get('Authorization')
+        if token:
+            try:
+                token = token.split(' ')[1]
+                payload = decode_token(token)
+                if payload:
+                    user_id = payload['user_id']
+
+                    # Save with primary disease info
+                    primary = results['primary_diagnosis']
+                    save_test_result(
+                        user_id=user_id,
+                        test_type=f'multi_disease_{test_type}',
+                        prediction=primary['disease'],
+                        confidence=primary['probability'] / 100,
+                        features=results['key_features'],
+                        audio_path=filepath
+                    )
+            except:
+                pass  # Continue without saving if token invalid
+
+        # Generate visualizations (using existing function)
+        y, sr, _ = analyze_audio_file(filepath)
+
+        # Add visualization URLs
+        results['visualizations'] = {
+            'waveform_url': f'/api/temp/waveform.png?t={timestamp}',
+            'spectrogram_url': f'/api/temp/spectrogram.png?t={timestamp}'
+        }
+        results['audio_file'] = filename
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+
+
+@app.route('/api/recording-instructions/<test_type>', methods=['GET'])
+def get_instructions(test_type):
+    """Get recording instructions for specific test type"""
+    try:
+        instructions = get_recording_instructions(test_type)
+        return jsonify({
+            'success': True,
+            'instructions': instructions
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to get instructions: {str(e)}'}), 500
 
 
 # ============================================================================
@@ -525,16 +724,288 @@ def serve_upload_file(filename):
 
 
 # ============================================================================
+# DOCTOR BOOKING SYSTEM ENDPOINTS
+# ============================================================================
+
+@app.route('/api/doctors', methods=['GET'])
+def get_doctors():
+    """Get all available doctors with optional filters"""
+    try:
+        city = request.args.get('city')
+        specialization = request.args.get('specialization')
+
+        success, doctors = get_all_doctors(city=city, specialization=specialization)
+
+        if not success:
+            return jsonify({'error': 'Failed to retrieve doctors'}), 500
+
+        return jsonify({
+            'success': True,
+            'doctors': doctors,
+            'count': len(doctors)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve doctors: {str(e)}'}), 500
+
+
+@app.route('/api/doctors/<doctor_id>', methods=['GET'])
+def get_doctor_details(doctor_id):
+    """Get detailed information about a specific doctor"""
+    try:
+        success, doctor = get_doctor_by_id(doctor_id)
+
+        if not success:
+            return jsonify({'error': doctor}), 404
+
+        # Get doctor's availability
+        success_avail, availability = get_doctor_availability(doctor_id)
+        if success_avail:
+            doctor['availability'] = availability
+
+        # Get doctor's reviews
+        success_reviews, reviews = get_doctor_reviews(doctor_id)
+        if success_reviews:
+            doctor['reviews'] = reviews
+
+        return jsonify({
+            'success': True,
+            'doctor': doctor
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve doctor details: {str(e)}'}), 500
+
+
+@app.route('/api/doctors', methods=['POST'])
+@token_required
+def add_new_doctor():
+    """Add a new doctor (admin only in production - add role check)"""
+    try:
+        data = request.get_json()
+
+        required_fields = ['full_name', 'email', 'phone_number', 'specialization',
+                          'qualification', 'experience_years', 'city', 'state',
+                          'consultation_fee']
+
+        for field in required_fields:
+            if field not in data or not data[field]:
+                return jsonify({'error': f'{field} is required'}), 400
+
+        success, result = add_doctor(
+            full_name=data['full_name'],
+            email=data['email'],
+            phone_number=data['phone_number'],
+            specialization=data['specialization'],
+            qualification=data['qualification'],
+            experience_years=data['experience_years'],
+            city=data['city'],
+            state=data['state'],
+            consultation_fee=data['consultation_fee'],
+            sub_specialties=data.get('sub_specialties'),
+            hospital_affiliation=data.get('hospital_affiliation'),
+            clinic_address=data.get('clinic_address'),
+            about=data.get('about'),
+            languages=data.get('languages')
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Doctor added successfully',
+                'doctor_id': result
+            }), 201
+        else:
+            return jsonify({'error': result}), 400
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to add doctor: {str(e)}'}), 500
+
+
+@app.route('/api/appointments', methods=['POST'])
+@token_required
+def book_appointment():
+    """Book an appointment with a doctor"""
+    try:
+        data = request.get_json()
+        user_id = request.current_user['user_id']
+
+        required_fields = ['doctor_id', 'appointment_date', 'appointment_time']
+        for field in required_fields:
+            if field not in data or not data[field]:
+                return jsonify({'error': f'{field} is required'}), 400
+
+        success, result = create_appointment(
+            user_id=user_id,
+            doctor_id=data['doctor_id'],
+            appointment_date=data['appointment_date'],
+            appointment_time=data['appointment_time'],
+            test_result_id=data.get('test_result_id'),
+            symptoms=data.get('symptoms'),
+            notes=data.get('notes'),
+            risk_score=data.get('risk_score')
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Appointment booked successfully',
+                'appointment_id': result
+            }), 201
+        else:
+            return jsonify({'error': result}), 400
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to book appointment: {str(e)}'}), 500
+
+
+@app.route('/api/appointments', methods=['GET'])
+@token_required
+def get_appointments():
+    """Get all appointments for the authenticated user"""
+    try:
+        user_id = request.current_user['user_id']
+        status = request.args.get('status')
+
+        success, appointments = get_user_appointments(user_id, status=status)
+
+        if not success:
+            return jsonify({'error': 'Failed to retrieve appointments'}), 500
+
+        return jsonify({
+            'success': True,
+            'appointments': appointments,
+            'count': len(appointments)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve appointments: {str(e)}'}), 500
+
+
+@app.route('/api/appointments/<appointment_id>', methods=['PATCH'])
+@token_required
+def update_appointment(appointment_id):
+    """Update appointment status (cancel, reschedule, etc.)"""
+    try:
+        data = request.get_json()
+
+        if 'status' not in data:
+            return jsonify({'error': 'Status is required'}), 400
+
+        success, result = update_appointment_status(
+            appointment_id=appointment_id,
+            status=data['status'],
+            cancellation_reason=data.get('cancellation_reason')
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': result
+            }), 200
+        else:
+            return jsonify({'error': result}), 400
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to update appointment: {str(e)}'}), 500
+
+
+@app.route('/api/doctors/<doctor_id>/reviews', methods=['POST'])
+@token_required
+def add_review(doctor_id):
+    """Add a review for a doctor"""
+    try:
+        data = request.get_json()
+        user_id = request.current_user['user_id']
+
+        if 'rating' not in data:
+            return jsonify({'error': 'Rating is required'}), 400
+
+        if not (1 <= data['rating'] <= 5):
+            return jsonify({'error': 'Rating must be between 1 and 5'}), 400
+
+        success, result = add_doctor_review(
+            doctor_id=doctor_id,
+            user_id=user_id,
+            rating=data['rating'],
+            review_text=data.get('review_text'),
+            appointment_id=data.get('appointment_id')
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Review added successfully',
+                'review_id': result
+            }), 201
+        else:
+            return jsonify({'error': result}), 400
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to add review: {str(e)}'}), 500
+
+
+@app.route('/api/doctors/<doctor_id>/reviews', methods=['GET'])
+def get_reviews(doctor_id):
+    """Get all reviews for a doctor"""
+    try:
+        success, reviews = get_doctor_reviews(doctor_id)
+
+        if not success:
+            return jsonify({'error': 'Failed to retrieve reviews'}), 500
+
+        return jsonify({
+            'success': True,
+            'reviews': reviews,
+            'count': len(reviews)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve reviews: {str(e)}'}), 500
+
+
+# ============================================================================
 # HEALTH CHECK
 # ============================================================================
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """API health check endpoint"""
+    readiness = collect_readiness()
+
     return jsonify({
-        'status': 'healthy',
+        'status': 'healthy' if readiness['status'] == 'ready' else 'degraded',
         'service': 'MediGuardian API',
-        'version': '1.0.0'
+        'version': '1.0.0',
+        'readiness': {
+            'status': readiness['status'],
+            'model_cached': readiness['model_cache']['parkinson_model_loaded'],
+            'database_connected': readiness['database']['connected'],
+            'missing_tables': readiness['database']['missing_tables'],
+            'doctor_count': readiness['database']['doctor_count'],
+        }
+    }), 200
+
+
+@app.route('/api/health/readiness', methods=['GET'])
+def readiness_check():
+    """Detailed readiness endpoint for deployment checks."""
+    readiness = collect_readiness()
+    status_code = 200 if readiness['status'] == 'ready' else 503
+    return jsonify(readiness), status_code
+
+
+@app.route('/api/seed-status', methods=['GET'])
+def seed_status():
+    """Return doctor-seed status to verify booking bootstrap."""
+    readiness = collect_readiness()
+    return jsonify({
+        'success': True,
+        'doctor_count': readiness['database']['doctor_count'],
+        'seeded': readiness['database']['doctor_count'] > 0,
+        'missing_tables': readiness['database']['missing_tables'],
+        'status': readiness['status'],
+        'checked_at': readiness['checked_at'],
     }), 200
 
 
@@ -551,7 +1022,14 @@ def index():
                 'verify': 'GET /api/auth/verify'
             },
             'analysis': {
-                'analyze': 'POST /api/analyze'
+                'analyze': 'POST /api/analyze',
+                'analyze_multi_disease': 'POST /api/analyze/multi-disease',
+                'recording_instructions': 'GET /api/recording-instructions/<test_type>'
+            },
+            'health': {
+                'liveness': 'GET /api/health',
+                'readiness': 'GET /api/health/readiness',
+                'seed_status': 'GET /api/seed-status'
             },
             'dashboard': {
                 'dashboard': 'GET /api/dashboard',

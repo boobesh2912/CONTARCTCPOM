@@ -1,21 +1,39 @@
 import AppShell from './AppShell';
-import { BookOpen, PlayCircle, Timer, HeartPulse, Accessibility, Sparkles } from 'lucide-react';
+import { BookOpen, PlayCircle, Timer, HeartPulse, Accessibility, Sparkles, CheckCircle2, CalendarClock } from 'lucide-react';
 
 const videos = [
   {
-    title: 'Parkinson\'s Disease Explained',
-    description: 'A clear overview of symptoms, progression, and early warning signs.',
-    videoId: 'H_F7OxMEz90',
+    title: 'Parkinson\'s Awareness & Guidance',
+    description: 'Educational overview and practical understanding of progression and support.',
+    videoId: '8fMnIxV-8PY',
   },
   {
-    title: 'Exercises for Parkinson\'s Patients',
-    description: 'Guided movement routines to improve mobility and balance.',
-    videoId: 'nJoS5MODfe0',
+    title: 'Neurological Care & Management',
+    description: 'Clinical perspective on care planning and risk management steps.',
+    videoId: 'OZ9VV9iMTZw',
   },
   {
-    title: 'Speech Therapy Voice Practice',
-    description: 'Voice strengthening drills you can do daily at home.',
-    videoId: 'wfGqbN5VmLo',
+    title: 'Voice and Daily Function Support',
+    description: 'Supportive routines for voice, speech, and everyday communication.',
+    videoId: 'riTM_HoWl1k',
+  },
+];
+
+const pathways = [
+  {
+    title: 'Week 1: Baseline Awareness',
+    focus: 'Learn symptoms and establish a daily voice routine.',
+    checklist: ['Read Disease Basics module', 'Complete 3 guided voice warmups', 'Record 1 baseline screening'],
+  },
+  {
+    title: 'Week 2: Movement + Speech',
+    focus: 'Pair mobility drills with breath-supported speech.',
+    checklist: ['Perform mobility drill 4 times', 'Do sustained-vowel exercise daily', 'Review trend dashboard once'],
+  },
+  {
+    title: 'Week 3+: Trend Tracking',
+    focus: 'Interpret changes and prepare clinician questions.',
+    checklist: ['Review weekly changes', 'Write top 3 observations', 'Book specialist consultation if risk rises'],
   },
 ];
 
@@ -71,6 +89,30 @@ const Learning = ({ user, onLogout }) => {
       <div className="space-y-6">
         <section className={cardClass}>
           <div className="mb-4 flex items-center gap-2">
+            <CalendarClock className="h-5 w-5 text-[var(--brand-700)]" />
+            <h2 className="font-display text-xl font-bold">Guided Learning Path</h2>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            {pathways.map((path) => (
+              <article key={path.title} className="rounded-xl border border-[var(--line)] bg-white p-4">
+                <h3 className="font-display text-lg font-bold">{path.title}</h3>
+                <p className="mt-1 text-sm text-[var(--ink-700)]">{path.focus}</p>
+                <ul className="mt-3 space-y-2">
+                  {path.checklist.map((item) => (
+                    <li key={item} className="flex items-start gap-2 text-sm text-[var(--ink-700)]">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-700)]" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className={cardClass}>
+          <div className="mb-4 flex items-center gap-2">
             <BookOpen className="h-5 w-5 text-[var(--brand-700)]" />
             <h2 className="font-display text-xl font-bold">Learning Modules</h2>
           </div>
@@ -106,7 +148,7 @@ const Learning = ({ user, onLogout }) => {
                 <div className="aspect-video">
                   <iframe
                     className="h-full w-full"
-                    src={"https://www.youtube.com/embed/Hu5KVfFnrh0?si=ArSTfcgsF-OMXPQD"}
+                    src={`https://www.youtube.com/embed/${video.videoId}`}
                     title={video.title}
                     loading="lazy"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
@@ -137,7 +179,7 @@ const Learning = ({ user, onLogout }) => {
                   <div className="mb-3 flex items-start justify-between">
                     <div>
                       <h3 className="font-display text-lg font-bold">{exercise.name}</h3>
-                      <p className="text-xs text-[var(--ink-600)]">{exercise.duration} � {exercise.frequency}</p>
+                      <p className="text-xs text-[var(--ink-600)]">{exercise.duration} | {exercise.frequency}</p>
                     </div>
                     <Icon className="h-5 w-5 text-[var(--brand-700)]" />
                   </div>
